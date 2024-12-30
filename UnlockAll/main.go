@@ -9,29 +9,62 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 )
 
 func main() {
+	// 获取当前工作目录和可执行文件路径
 	path, _ := os.Executable()
 	_, selfName := filepath.Split(path)
 	str, _ := os.Getwd()
-	allFile, _ := getAllFileIncludeSubFolder(str)
-	for _, path := range allFile {
-		if strutil.AfterLast(path, "Unlock.exe") == "" {
-			continue
+
+	// 使用 WaitGroup 等待所有任务完成
+	var wg sync.WaitGroup
+
+	// 并发获取所有文件
+	allFileChan := make(chan string)
+	go func() {
+		allFile, _ := getAllFileIncludeSubFolder(str)
+		for _, path := range allFile {
+			allFileChan <- path
 		}
-		if strutil.AfterLast(path, selfName) == "" {
-			continue
-		}
-		dstFilePath := path + ".temp"
-		copyFile(path, dstFilePath)
-		err := os.Remove(path)
-		if err != nil {
-			log.Printf("文件%v未执行成功", path)
-		}
-		renameFile(dstFilePath, path)
+		close(allFileChan)
+	}()
+
+	// 创建多个 Goroutine 处理文件操作
+	for path := range allFileChan {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+
+			// 排除不匹配的文件
+			if strutil.AfterLast(path, "Unlock.exe") == "" || strutil.AfterLast(path, selfName) == "" {
+				return
+			}
+
+			dstFilePath := path + ".temp"
+
+			// 复制文件
+			if err := copyFile(path, dstFilePath); err != nil {
+				log.Printf("文件 %v 复制失败: %v", path, err)
+				return
+			}
+
+			// 删除原始文件
+			if err := os.Remove(path); err != nil {
+				log.Printf("文件 %v 删除失败: %v", path, err)
+				return
+			}
+
+			// 重命名文件
+			renameFile(dstFilePath, path)
+		}(path)
 	}
+
+	// 等待所有 Goroutines 完成
+	wg.Wait()
+
 	log.Println("解密完成，按回车键退出")
 	fmt.Scanln()
 }
@@ -48,16 +81,24 @@ func renameFile(sourcePath, dstFilePath string) {
 	} else {
 		info := string(output)
 		if info != "" {
-			log.Println(string(output))
+			log.Println(info)
 		}
 	}
 }
 
-func copyFile(sourcePath, dstFilePath string) (err error) {
-	source, _ := os.Open(sourcePath)
-	destination, _ := os.OpenFile(dstFilePath, os.O_CREATE|os.O_WRONLY, 0666)
+func copyFile(sourcePath, dstFilePath string) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
 	defer source.Close()
+
+	destination, err := os.OpenFile(dstFilePath, os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
 	defer destination.Close()
+
 	buf := make([]byte, 1024)
 	for {
 		n, err := source.Read(buf)
@@ -74,16 +115,10 @@ func copyFile(sourcePath, dstFilePath string) (err error) {
 	return nil
 }
 
-//
-// getAllFileIncludeSubFolder
-//  @Description: 获取目录下所有文件（包含子目录）
-//  @param folder
-//  @return []string
-//  @return error
-//
+// getAllFileIncludeSubFolder 获取目录下所有文件（包含子目录）
 func getAllFileIncludeSubFolder(folder string) ([]string, error) {
 	var result []string
-	filepath.Walk(folder, func(path string, info fs.FileInfo, err error) error {
+	err := filepath.Walk(folder, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
 			log.Println(err.Error())
 			return err
@@ -93,5 +128,5 @@ func getAllFileIncludeSubFolder(folder string) ([]string, error) {
 		}
 		return nil
 	})
-	return result, nil
+	return result, err
 }
